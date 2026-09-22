@@ -6,7 +6,7 @@ This file documents the architecture, directory structure, operational commands,
 
 ## 1. Architecture Overview
 
-The system is designed as a decoupled, resilient microservices blog platform built with Python 3, FastAPI, and SQLite (following the **Database-per-Service** pattern).
+The system is designed as a decoupled, resilient microservices blog platform built with Python 3, FastAPI, Supabase (PostgreSQL), and Prisma ORM.
 
 ```
                             [ Client / Browser ]
@@ -45,11 +45,14 @@ The system is designed as a decoupled, resilient microservices blog platform bui
 
 ```
 blog/
-├── data/                      # Isolated SQLite databases (gitignored/auto-created)
-│   ├── user.db
-│   ├── blog.db
-│   ├── comment.db
-│   └── payment.db
+├── prisma/                    # Prisma ORM schema & migrations
+│   └── schema.prisma          # PostgreSQL models mapped to Supabase
+├── sql/                       # SQL table creation scripts for Supabase SQL Editor
+│   ├── all_tables.sql
+│   ├── 01_users.sql
+│   ├── 02_posts.sql
+│   ├── 03_comments.sql
+│   └── 04_payments.sql
 ├── services/
 │   ├── gateway/               # Central API Gateway & composite endpoints
 │   │   ├── __init__.py
@@ -184,8 +187,8 @@ docker compose up --build
 ## 5. Architectural & Coding Rules for Agents
 
 1. **Strict Microservice Decoupling**:
-   - **Never** perform cross-database SQL queries or import another service's `database.py`.
-   - Each service **must** only read/write to its own designated database (`user.db`, `blog.db`, `comment.db`, `payment.db`).
+   - **Never** perform cross-domain direct database queries or import another service's `database.py`.
+   - Each service **must** only operate on its designated models (`User`, `Post`, `Comment`, `Wallet` / `Transaction`) via Prisma.
    - Cross-domain validation (e.g. verifying a user or post exists) must be performed via asynchronous HTTP calls using `httpx`.
 
 2. **Standard Envelopes**:
@@ -196,4 +199,4 @@ docker compose up --build
    - Downstream services accept both direct Bearer tokens (for standalone execution) and the `X-User-Id` header (when behind the Gateway).
 
 4. **Self-Contained Dependencies**:
-   - Keep dependencies lean. SQLite and pure-Python crypto implementations avoid compilation issues across deployment targets.
+   - Keep dependencies lean. Supabase PostgreSQL via Prisma ORM and pure-Python crypto implementations avoid compilation issues across deployment targets.

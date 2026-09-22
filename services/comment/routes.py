@@ -1,11 +1,10 @@
-import sqlite3
 from typing import Dict, List, Optional
 from fastapi import APIRouter, Header, HTTPException, status
 import httpx
 
-from services.comment.database import get_db
 from services.comment.models import CommentCreate, CommentResponse
 from shared.config import BLOG_SERVICE_URL
+from shared.prisma_client import get_prisma
 from shared.schemas import APIResponse, HealthResponse
 from shared.security import decode_access_token
 
@@ -45,13 +44,16 @@ async def verify_post_exists(post_id: int) -> bool:
             resp = await client.get(f"{BLOG_SERVICE_URL}/posts/{post_id}")
             return resp.status_code == 200
     except Exception:
-        # If blog service is unreachable during decoupled testing, fallback safely
         return True
 
 
 @router.get("/health", response_model=HealthResponse)
 def health_check():
-    return HealthResponse(service="comment-service", status="healthy")
+    return HealthResponse(
+        service="comment-service",
+        status="healthy",
+        details={"orm": "Prisma", "database": "Supabase PostgreSQL"},
+    )
 
 
 @router.post("/comments", response_model=APIResponse[CommentResponse], status_code=status.HTTP_201_CREATED)
@@ -62,7 +64,6 @@ async def create_comment(
 ):
     user_id = get_current_user_id(authorization, x_user_id)
 
-    # Inter-service verification
     post_exists = await verify_post_exists(comment_data.post_id)
     if not post_exists:
         raise HTTPException(
@@ -70,60 +71,65 @@ async def create_comment(
             detail=f"Target post {comment_data.post_id} does not exist",
         )
 
-    with get_db() as conn:
-        cursor = conn.cursor()
+    db = await get_prisma()
 
-        # If parent_id provided, ensure parent comment exists for same post
-        if comment_data.parent_id is not None:
-            cursor.execute(
-                "SELECT post_id FROM comments WHERE id = ?",
-                (comment_data.parent_id,),
+    if comment_data.parent_id is not None:
+        parent = await db.comment.find_unique(where={"id": comment_data.parent_id})
+        if not parent:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Parent comment {comment_data.parent_id} not found",
             )
-            parent = cursor.fetchone()
-            if not parent:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Parent comment {comment_data.parent_id} not found",
-                )
-            if parent["post_id"] != comment_data.post_id:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Parent comment belongs to a different post",
-                )
+        if parent.post_id != comment_data.post_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Parent comment belongs to a different post",
+            )
 
-        cursor.execute(
-            """
-            INSERT INTO comments (post_id, user_id, content, parent_id)
-            VALUES (?, ?, ?, ?)
-            """,
-            (comment_data.post_id, user_id, comment_data.content, comment_data.parent_id),
-        )
-        conn.commit()
-        comment_id = cursor.lastrowid
-        cursor.execute("SELECT * FROM comments WHERE id = ?", (comment_id,))
-        created_row = cursor.fetchone()
+    created = await db.comment.create(
+        data={
+            "post_id": comment_data.post_id,
+            "user_id": user_id,
+            "content": comment_data.content,
+            "parent_id": comment_data.parent_id,
+        }
+    )
 
     return APIResponse(
         message="Comment added successfully",
-        data=CommentResponse(**dict(created_row), replies=[]),
+        data=CommentResponse(
+            id=created.id,
+            post_id=created.post_id,
+            user_id=created.user_id,
+            content=created.content,
+            parent_id=created.parent_id,
+            created_at=str(created.created_at),
+            replies=[],
+        ),
     )
 
 
 @router.get("/posts/{post_id}/comments", response_model=APIResponse[List[CommentResponse]])
-def get_post_comments(post_id: int):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM comments WHERE post_id = ? ORDER BY created_at ASC",
-            (post_id,),
-        )
-        rows = cursor.fetchall()
+async def get_post_comments(post_id: int):
+    db = await get_prisma()
+    rows = await db.comment.find_many(
+        where={"post_id": post_id},
+        order={"created_at": "asc"},
+    )
 
     comment_map: Dict[int, CommentResponse] = {}
     top_level: List[CommentResponse] = []
 
     for r in rows:
-        c = CommentResponse(**dict(r), replies=[])
+        c = CommentResponse(
+            id=r.id,
+            post_id=r.post_id,
+            user_id=r.user_id,
+            content=r.content,
+            parent_id=r.parent_id,
+            created_at=str(r.created_at),
+            replies=[],
+        )
         comment_map[c.id] = c
 
     for c in comment_map.values():
@@ -136,43 +142,47 @@ def get_post_comments(post_id: int):
 
 
 @router.get("/comments/{comment_id}", response_model=APIResponse[CommentResponse])
-def get_comment(comment_id: int):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM comments WHERE id = ?", (comment_id,))
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Comment with ID {comment_id} not found",
-            )
-        return APIResponse(message="Comment retrieved", data=CommentResponse(**dict(row)))
+async def get_comment(comment_id: int):
+    db = await get_prisma()
+    row = await db.comment.find_unique(where={"id": comment_id})
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Comment with ID {comment_id} not found",
+        )
+    return APIResponse(
+        message="Comment retrieved",
+        data=CommentResponse(
+            id=row.id,
+            post_id=row.post_id,
+            user_id=row.user_id,
+            content=row.content,
+            parent_id=row.parent_id,
+            created_at=str(row.created_at),
+        ),
+    )
 
 
 @router.delete("/comments/{comment_id}", response_model=APIResponse[dict])
-def delete_comment(
+async def delete_comment(
     comment_id: int,
     authorization: Optional[str] = Header(None),
     x_user_id: Optional[str] = Header(None),
 ):
     user_id = get_current_user_id(authorization, x_user_id)
+    db = await get_prisma()
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM comments WHERE id = ?", (comment_id,))
-        existing = cursor.fetchone()
-        if not existing:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Comment with ID {comment_id} not found",
-            )
-        if existing["user_id"] != user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You are not authorized to delete this comment",
-            )
+    existing = await db.comment.find_unique(where={"id": comment_id})
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Comment with ID {comment_id} not found",
+        )
+    if existing.user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to delete this comment",
+        )
 
-        cursor.execute("DELETE FROM comments WHERE id = ? OR parent_id = ?", (comment_id, comment_id))
-        conn.commit()
-
+    await db.comment.delete(where={"id": comment_id})
     return APIResponse(message="Comment deleted successfully", data={"comment_id": comment_id})

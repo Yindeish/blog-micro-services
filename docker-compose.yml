@@ -23,9 +23,8 @@ services:
     command: python -m uvicorn services.user.main:app --host 0.0.0.0 --port 8001
     ports:
       - "8001:8001"
-    volumes:
-      - ./data:/app/data
     environment:
+      - DATABASE_URL=${DATABASE_URL}
       - JWT_SECRET=super-secret-key-change-in-production
 
   blog-service:
@@ -33,9 +32,8 @@ services:
     command: python -m uvicorn services.blog.main:app --host 0.0.0.0 --port 8002
     ports:
       - "8002:8002"
-    volumes:
-      - ./data:/app/data
     environment:
+      - DATABASE_URL=${DATABASE_URL}
       - USER_SERVICE_URL=http://user-service:8001
       - JWT_SECRET=super-secret-key-change-in-production
 
@@ -44,9 +42,8 @@ services:
     command: python -m uvicorn services.comment.main:app --host 0.0.0.0 --port 8003
     ports:
       - "8003:8003"
-    volumes:
-      - ./data:/app/data
     environment:
+      - DATABASE_URL=${DATABASE_URL}
       - BLOG_SERVICE_URL=http://blog-service:8002
       - JWT_SECRET=super-secret-key-change-in-production
 
@@ -55,8 +52,9 @@ services:
     command: python -m uvicorn services.payment.main:app --host 0.0.0.0 --port 8004
     ports:
       - "8004:8004"
-    volumes:
-      - ./data:/app/data
     environment:
+      - DATABASE_URL=${DATABASE_URL}
       - BLOG_SERVICE_URL=http://blog-service:8002
+      - SQUAD_SECRET_KEY=sk_70b3d63fe856f4da6f564a248c14338a3c4d9d0f
+      - SQUAD_PUBLIC_KEY=pk_70b3d63fe856f4da165c4c2399642cfa3d38821c
       - JWT_SECRET=super-secret-key-change-in-production

@@ -2,20 +2,21 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import uvicorn
 
-from services.payment.database import init_db
+from services.payment.database import close_db, init_db
 from services.payment.routes import router
 from shared.config import PAYMENT_PORT
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    await init_db()
     yield
+    await close_db()
 
 
 app = FastAPI(
     title="Payment Microservice",
-    description="Manages wallets, tipping, post unlocking, and transaction audit trails.",
+    description="Manages wallets, tipping, post unlocking, and Squad payments via Prisma & Supabase.",
     version="1.0.0",
     lifespan=lifespan,
 )

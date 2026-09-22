@@ -1,11 +1,9 @@
-import sqlite3
 import time
 import uuid
 from typing import List, Optional
 from fastapi import APIRouter, Header, HTTPException, Request, status
 import httpx
 
-from services.payment.database import get_db
 from services.payment.models import (
     AccessPassResponse,
     InitiatePaymentRequest,
@@ -19,9 +17,9 @@ from services.payment.models import (
 )
 from services.payment.squad import squad_gateway
 from shared.config import BLOG_SERVICE_URL
+from shared.prisma_client import get_prisma
 from shared.schemas import APIResponse, HealthResponse
 from shared.security import decode_access_token
-from shared.supabase_client import supabase
 
 router = APIRouter()
 
@@ -52,63 +50,36 @@ def get_current_user_id(
     return int(payload["sub"])
 
 
-async def db_get_or_create_wallet(user_id: int) -> dict:
-    """Get or create wallet from Supabase with SQLite fallback."""
-    try:
-        row = await supabase.single("wallets", {"user_id": user_id})
-        if row:
-            return row
-        new_wallet = {"user_id": user_id, "balance": 0.0, "currency": "NGN"}
-        inserted = await supabase.insert("wallets", new_wallet)
-        if inserted:
-            return inserted
-    except Exception:
-        pass
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id, balance, 'NGN' as currency, updated_at FROM wallets WHERE user_id = ?", (user_id,))
-        row = cursor.fetchone()
-        if not row:
-            cursor.execute("INSERT INTO wallets (user_id, balance) VALUES (?, 0.0)", (user_id,))
-            cursor.execute("SELECT user_id, balance, 'NGN' as currency, updated_at FROM wallets WHERE user_id = ?", (user_id,))
-            row = cursor.fetchone()
-        conn.commit()
-    return dict(row)
-
-
-async def db_credit_wallet(user_id: int, amount: float, ref_id: str, description: str):
-    """Credit wallet and record transaction in Supabase and SQLite."""
-    try:
-        wallet = await db_get_or_create_wallet(user_id)
-        new_bal = round(float(wallet.get("balance", 0.0)) + amount, 2)
-        await supabase.update("wallets", {"user_id": user_id}, {"balance": new_bal})
-        await supabase.insert(
-            "transactions",
-            {
-                "user_id": user_id,
-                "type": "topup",
-                "amount": amount,
-                "reference_id": ref_id,
-                "description": description,
-                "status": "success",
-            },
+async def get_or_create_wallet(user_id: int):
+    """Fetch wallet via Prisma ORM, or create one if not existing."""
+    db = await get_prisma()
+    wallet = await db.wallet.find_unique(where={"user_id": user_id})
+    if not wallet:
+        wallet = await db.wallet.create(
+            data={"user_id": user_id, "balance": 0.0, "currency": "NGN"}
         )
-    except Exception:
-        pass
+    return wallet
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO wallets (user_id, balance) VALUES (?, 0.0)", (user_id,))
-        cursor.execute("UPDATE wallets SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?", (amount, user_id))
-        cursor.execute(
-            """
-            INSERT INTO transactions (user_id, type, amount, reference_id, description)
-            VALUES (?, 'topup', ?, ?, ?)
-            """,
-            (user_id, amount, ref_id, description),
-        )
-        conn.commit()
+
+async def credit_wallet(user_id: int, amount: float, ref_id: str, description: str):
+    """Credit user wallet balance and record transaction using Prisma."""
+    db = await get_prisma()
+    await get_or_create_wallet(user_id)
+    updated = await db.wallet.update(
+        where={"user_id": user_id},
+        data={"balance": {"increment": amount}},
+    )
+    await db.transaction.create(
+        data={
+            "user_id": user_id,
+            "type": "topup",
+            "amount": amount,
+            "reference_id": ref_id,
+            "description": description,
+            "status": "success",
+        }
+    )
+    return updated
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -116,7 +87,7 @@ def health_check():
     return HealthResponse(
         service="payment-service",
         status="healthy",
-        details={"provider": "Squad (GTCO)", "database": "Supabase + SQLite fallback"},
+        details={"orm": "Prisma", "provider": "Squad (GTCO)", "database": "Supabase PostgreSQL"},
     )
 
 
@@ -187,7 +158,7 @@ async def verify_squad_payment(transaction_ref: str):
     user_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
 
     if is_paid and user_id:
-        await db_credit_wallet(
+        await credit_wallet(
             user_id=user_id,
             amount=amount,
             ref_id=transaction_ref,
@@ -227,7 +198,7 @@ async def squad_webhook(request: Request):
         parts = transaction_ref.split("-")
         user_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
         if user_id:
-            await db_credit_wallet(
+            await credit_wallet(
                 user_id=user_id,
                 amount=amount_naira,
                 ref_id=transaction_ref,
@@ -237,7 +208,7 @@ async def squad_webhook(request: Request):
     return {"status": "success"}
 
 
-# --- Existing Wallet & Internal Flow Endpoints ---
+# --- Wallet & Internal Payment Endpoints ---
 
 @router.get("/wallet", response_model=APIResponse[WalletResponse])
 async def get_wallet(
@@ -245,14 +216,14 @@ async def get_wallet(
     x_user_id: Optional[str] = Header(None),
 ):
     user_id = get_current_user_id(authorization, x_user_id)
-    wallet = await db_get_or_create_wallet(user_id)
+    wallet = await get_or_create_wallet(user_id)
     return APIResponse(
         message="Wallet retrieved",
         data=WalletResponse(
-            user_id=wallet["user_id"],
-            balance=float(wallet.get("balance", 0.0)),
-            currency=wallet.get("currency", "NGN"),
-            updated_at=str(wallet.get("updated_at", "")),
+            user_id=wallet.user_id,
+            balance=float(wallet.balance),
+            currency=wallet.currency,
+            updated_at=str(wallet.updated_at),
         ),
     )
 
@@ -265,21 +236,20 @@ async def top_up_wallet(
 ):
     user_id = get_current_user_id(authorization, x_user_id)
     ref_id = f"TOP-{uuid.uuid4().hex[:10].upper()}"
-    await db_credit_wallet(user_id, req.amount, ref_id, f"Direct wallet top-up via {req.payment_method}")
-    wallet = await db_get_or_create_wallet(user_id)
+    updated = await credit_wallet(user_id, req.amount, ref_id, f"Direct wallet top-up via {req.payment_method}")
     return APIResponse(
         message="Wallet top-up successful",
         data=WalletResponse(
-            user_id=wallet["user_id"],
-            balance=float(wallet.get("balance", 0.0)),
-            currency="NGN",
-            updated_at=str(wallet.get("updated_at", "")),
+            user_id=updated.user_id,
+            balance=float(updated.balance),
+            currency=updated.currency,
+            updated_at=str(updated.updated_at),
         ),
     )
 
 
 @router.post("/tip", response_model=APIResponse[dict])
-def send_tip(
+async def send_tip(
     req: TipRequest,
     authorization: Optional[str] = Header(None),
     x_user_id: Optional[str] = Header(None),
@@ -291,39 +261,47 @@ def send_tip(
             detail="Cannot send a tip to yourself",
         )
 
+    db = await get_prisma()
+    sender_wallet = await get_or_create_wallet(sender_id)
+    if float(sender_wallet.balance) < req.amount:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Insufficient wallet balance. Current balance: ₦{sender_wallet.balance}",
+        )
+
     ref_id = f"TIP-{uuid.uuid4().hex[:10].upper()}"
+    desc = req.note or f"Tip for author #{req.recipient_user_id}"
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id, balance FROM wallets WHERE user_id = ?", (sender_id,))
-        sender_row = cursor.fetchone()
-        if not sender_row or sender_row["balance"] < req.amount:
-            bal = sender_row["balance"] if sender_row else 0.0
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Insufficient wallet balance. Current balance: {bal}",
-            )
+    # Ensure recipient wallet exists
+    await get_or_create_wallet(req.recipient_user_id)
 
-        cursor.execute("UPDATE wallets SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?", (req.amount, sender_id))
-        cursor.execute("INSERT OR IGNORE INTO wallets (user_id, balance) VALUES (?, 0.0)", (req.recipient_user_id,))
-        cursor.execute("UPDATE wallets SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?", (req.amount, req.recipient_user_id))
+    # Perform tip transfer
+    await db.wallet.update(where={"user_id": sender_id}, data={"balance": {"decrement": req.amount}})
+    await db.wallet.update(where={"user_id": req.recipient_user_id}, data={"balance": {"increment": req.amount}})
 
-        desc = req.note or f"Tip for author #{req.recipient_user_id}"
-        cursor.execute(
-            """
-            INSERT INTO transactions (user_id, type, amount, counterparty_id, reference_id, description)
-            VALUES (?, 'tip_sent', ?, ?, ?, ?)
-            """,
-            (sender_id, -req.amount, req.recipient_user_id, ref_id, desc),
-        )
-        cursor.execute(
-            """
-            INSERT INTO transactions (user_id, type, amount, counterparty_id, reference_id, description)
-            VALUES (?, 'tip_received', ?, ?, ?, ?)
-            """,
-            (req.recipient_user_id, req.amount, sender_id, ref_id, desc),
-        )
-        conn.commit()
+    # Record transactions
+    await db.transaction.create(
+        data={
+            "user_id": sender_id,
+            "type": "tip_sent",
+            "amount": -req.amount,
+            "counterparty_id": req.recipient_user_id,
+            "reference_id": ref_id,
+            "description": desc,
+            "status": "success",
+        }
+    )
+    await db.transaction.create(
+        data={
+            "user_id": req.recipient_user_id,
+            "type": "tip_received",
+            "amount": req.amount,
+            "counterparty_id": sender_id,
+            "reference_id": ref_id,
+            "description": desc,
+            "status": "success",
+        }
+    )
 
     return APIResponse(
         message=f"Tip of ₦{req.amount} sent successfully",
@@ -338,16 +316,20 @@ async def unlock_post(
     x_user_id: Optional[str] = Header(None),
 ):
     user_id = get_current_user_id(authorization, x_user_id)
+    db = await get_prisma()
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, user_id, post_id, amount_paid, created_at FROM access_passes WHERE user_id = ? AND post_id = ?",
-            (user_id, req.post_id),
+    existing = await db.accesspass.find_unique(where={"user_id_post_id": {"user_id": user_id, "post_id": req.post_id}})
+    if existing:
+        return APIResponse(
+            message="Post already unlocked",
+            data=AccessPassResponse(
+                id=existing.id,
+                user_id=existing.user_id,
+                post_id=existing.post_id,
+                amount_paid=float(existing.amount_paid),
+                created_at=str(existing.created_at),
+            ),
         )
-        existing = cursor.fetchone()
-        if existing:
-            return APIResponse(message="Post already unlocked", data=AccessPassResponse(**dict(existing)))
 
     price = 0.0
     author_id = 0
@@ -363,55 +345,64 @@ async def unlock_post(
 
     ref_id = f"POST-{uuid.uuid4().hex[:10].upper()}"
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        if price > 0.0:
-            cursor.execute("SELECT balance FROM wallets WHERE user_id = ?", (user_id,))
-            wallet = cursor.fetchone()
-            if not wallet or wallet["balance"] < price:
-                bal = wallet["balance"] if wallet else 0.0
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Insufficient balance ({bal}) to unlock post priced at ₦{price}",
-                )
-
-            cursor.execute("UPDATE wallets SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?", (price, user_id))
-            if author_id and author_id != user_id:
-                cursor.execute("INSERT OR IGNORE INTO wallets (user_id, balance) VALUES (?, 0.0)", (author_id,))
-                cursor.execute("UPDATE wallets SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?", (price, author_id))
-                cursor.execute(
-                    """
-                    INSERT INTO transactions (user_id, type, amount, counterparty_id, reference_id, description)
-                    VALUES (?, 'post_sale', ?, ?, ?, ?)
-                    """,
-                    (author_id, price, user_id, ref_id, f"Sold access to post #{req.post_id}"),
-                )
-
-            cursor.execute(
-                """
-                INSERT INTO transactions (user_id, type, amount, counterparty_id, reference_id, description)
-                VALUES (?, 'post_purchase', ?, ?, ?, ?)
-                """,
-                (user_id, -price, author_id, ref_id, f"Unlocked post #{req.post_id}"),
+    if price > 0.0:
+        wallet = await get_or_create_wallet(user_id)
+        if float(wallet.balance) < price:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Insufficient balance (₦{wallet.balance}) to unlock post priced at ₦{price}",
             )
 
-        cursor.execute(
-            """
-            INSERT INTO access_passes (user_id, post_id, amount_paid)
-            VALUES (?, ?, ?)
-            """,
-            (user_id, req.post_id, price),
-        )
-        pass_id = cursor.lastrowid
-        cursor.execute("SELECT id, user_id, post_id, amount_paid, created_at FROM access_passes WHERE id = ?", (pass_id,))
-        created_pass = cursor.fetchone()
-        conn.commit()
+        await db.wallet.update(where={"user_id": user_id}, data={"balance": {"decrement": price}})
+        if author_id and author_id != user_id:
+            await get_or_create_wallet(author_id)
+            await db.wallet.update(where={"user_id": author_id}, data={"balance": {"increment": price}})
+            await db.transaction.create(
+                data={
+                    "user_id": author_id,
+                    "type": "post_sale",
+                    "amount": price,
+                    "counterparty_id": user_id,
+                    "reference_id": ref_id,
+                    "description": f"Sold access to post #{req.post_id}",
+                    "status": "success",
+                }
+            )
 
-    return APIResponse(message="Post unlocked successfully", data=AccessPassResponse(**dict(created_pass)))
+        await db.transaction.create(
+            data={
+                "user_id": user_id,
+                "type": "post_purchase",
+                "amount": -price,
+                "counterparty_id": author_id,
+                "reference_id": ref_id,
+                "description": f"Unlocked post #{req.post_id}",
+                "status": "success",
+            }
+        )
+
+    created_pass = await db.accesspass.create(
+        data={
+            "user_id": user_id,
+            "post_id": req.post_id,
+            "amount_paid": price,
+        }
+    )
+
+    return APIResponse(
+        message="Post unlocked successfully",
+        data=AccessPassResponse(
+            id=created_pass.id,
+            user_id=created_pass.user_id,
+            post_id=created_pass.post_id,
+            amount_paid=float(created_pass.amount_paid),
+            created_at=str(created_pass.created_at),
+        ),
+    )
 
 
 @router.get("/access/{post_id}", response_model=APIResponse[dict])
-def check_post_access(
+async def check_post_access(
     post_id: int,
     authorization: Optional[str] = Header(None),
     x_user_id: Optional[str] = Header(None),
@@ -421,30 +412,32 @@ def check_post_access(
     except HTTPException:
         return APIResponse(message="Access checked", data={"has_access": False, "post_id": post_id})
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id FROM access_passes WHERE user_id = ? AND post_id = ?",
-            (user_id, post_id),
-        )
-        has_access = cursor.fetchone() is not None
-
-    return APIResponse(message="Access checked", data={"has_access": has_access, "post_id": post_id})
+    db = await get_prisma()
+    row = await db.accesspass.find_unique(where={"user_id_post_id": {"user_id": user_id, "post_id": post_id}})
+    return APIResponse(message="Access checked", data={"has_access": row is not None, "post_id": post_id})
 
 
 @router.get("/transactions", response_model=APIResponse[List[TransactionResponse]])
-def get_transactions(
+async def get_transactions(
     authorization: Optional[str] = Header(None),
     x_user_id: Optional[str] = Header(None),
 ):
     user_id = get_current_user_id(authorization, x_user_id)
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, user_id, type, amount, counterparty_id, reference_id, description, 'success' as status, created_at FROM transactions WHERE user_id = ? ORDER BY created_at DESC",
-            (user_id,),
-        )
-        rows = cursor.fetchall()
+    db = await get_prisma()
+    rows = await db.transaction.find_many(where={"user_id": user_id}, order={"created_at": "desc"})
 
-    txs = [TransactionResponse(**dict(r)) for r in rows]
+    txs = [
+        TransactionResponse(
+            id=r.id,
+            user_id=r.user_id,
+            type=r.type,
+            amount=float(r.amount),
+            counterparty_id=r.counterparty_id,
+            reference_id=r.reference_id,
+            description=r.description,
+            status=r.status,
+            created_at=str(r.created_at),
+        )
+        for r in rows
+    ]
     return APIResponse(message="Transactions retrieved", data=txs)
