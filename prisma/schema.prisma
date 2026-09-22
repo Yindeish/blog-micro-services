@@ -1,0 +1,98 @@
+// ====================================================================
+// Prisma Schema for Microservices Blog Platform
+// Configured for Supabase PostgreSQL
+// ====================================================================
+
+generator client {
+  provider             = "prisma-client-py"
+  recursive_type_depth = 5
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// 1. Users Model
+model User {
+  id              BigInt    @id @default(autoincrement())
+  username        String    @unique
+  email           String    @unique
+  hashed_password String
+  full_name       String?
+  bio             String?
+  created_at      DateTime  @default(now()) @db.Timestamptz
+
+  @@map("users")
+}
+
+// 2. Posts Model
+model Post {
+  id           BigInt    @id @default(autoincrement())
+  author_id    BigInt
+  title        String
+  slug         String    @unique
+  content      String
+  summary      String?
+  tags         Json?     @default("[]")
+  is_published Boolean   @default(true)
+  is_premium   Boolean   @default(false)
+  price        Float     @default(0.00)
+  created_at   DateTime  @default(now()) @db.Timestamptz
+  updated_at   DateTime  @default(now()) @updatedAt @db.Timestamptz
+
+  @@map("posts")
+}
+
+// 3. Comments Model
+model Comment {
+  id         BigInt    @id @default(autoincrement())
+  post_id    BigInt
+  user_id    BigInt
+  content    String
+  parent_id  BigInt?
+  created_at DateTime  @default(now()) @db.Timestamptz
+
+  // Threaded replies relation
+  parent     Comment?  @relation("CommentThread", fields: [parent_id], references: [id], onDelete: Cascade)
+  replies    Comment[] @relation("CommentThread")
+
+  @@map("comments")
+}
+
+// 4. Wallets Model
+model Wallet {
+  user_id    BigInt    @id
+  balance    Float     @default(0.00)
+  currency   String    @default("NGN")
+  updated_at DateTime  @default(now()) @updatedAt @db.Timestamptz
+
+  @@map("wallets")
+}
+
+// 5. Transactions Model
+model Transaction {
+  id              BigInt    @id @default(autoincrement())
+  user_id         BigInt
+  type            String    // 'topup', 'tip_sent', 'tip_received', 'post_purchase', 'post_sale'
+  amount          Float
+  counterparty_id BigInt?
+  reference_id    String?   @unique
+  description     String?
+  status          String    @default("success") // 'pending', 'success', 'failed'
+  created_at      DateTime  @default(now()) @db.Timestamptz
+
+  @@map("transactions")
+}
+
+// 6. Access Passes Model (Purchased premium posts)
+model AccessPass {
+  id          BigInt    @id @default(autoincrement())
+  user_id     BigInt
+  post_id     BigInt
+  amount_paid Float     @default(0.00)
+  created_at  DateTime  @default(now()) @db.Timestamptz
+
+  @@unique([user_id, post_id])
+  @@map("access_passes")
+}

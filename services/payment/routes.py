@@ -99,6 +99,7 @@ async def db_credit_wallet(user_id: int, amount: float, ref_id: str, description
 
     with get_db() as conn:
         cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO wallets (user_id, balance) VALUES (?, 0.0)", (user_id,))
         cursor.execute("UPDATE wallets SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?", (amount, user_id))
         cursor.execute(
             """

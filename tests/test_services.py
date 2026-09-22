@@ -45,10 +45,13 @@ class MicroservicesTestCase(unittest.TestCase):
         cls.post_patcher = patch("services.comment.routes.verify_post_exists", new_callable=AsyncMock)
         cls.mock_verify = cls.post_patcher.start()
         cls.mock_verify.return_value = True
+        cls.sb_single = patch("shared.supabase_client.supabase.single", new_callable=AsyncMock, return_value=None).start()
+        cls.sb_insert = patch("shared.supabase_client.supabase.insert", new_callable=AsyncMock, return_value=None).start()
+        cls.sb_update = patch("shared.supabase_client.supabase.update", new_callable=AsyncMock, return_value=None).start()
 
     @classmethod
     def tearDownClass(cls):
-        cls.post_patcher.stop()
+        patch.stopall()
         shutil.rmtree(test_dir, ignore_errors=True)
 
     def test_01_user_lifecycle(self):

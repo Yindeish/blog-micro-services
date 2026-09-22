@@ -124,6 +124,18 @@ uvicorn services.gateway.main:app --port 8000 --reload
 python3 -m unittest discover -s tests -p "test_*.py" -v
 ```
 
+### Prisma ORM Commands (Supabase Schema Sync)
+```bash
+# Generate Python client bindings from prisma/schema.prisma
+python3 -m prisma generate --schema=prisma/schema.prisma
+
+# Push schema directly to Supabase PostgreSQL database
+npx prisma db push
+
+# Open Prisma visual database browser GUI
+npx prisma studio
+```
+
 ### Docker Deployment
 ```bash
 docker compose up --build
