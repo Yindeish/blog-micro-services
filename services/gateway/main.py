@@ -198,11 +198,13 @@ async def user_proxy(path: str, request: Request):
 
 # Blog Service Proxy
 @app.api_route("/api/posts/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+@app.api_route("/api/blogs/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def blog_proxy(path: str, request: Request):
     return await forward_request(BLOG_SERVICE_URL, f"/posts/{path}", request)
 
 
 @app.api_route("/api/posts", methods=["GET", "POST"])
+@app.api_route("/api/blogs", methods=["GET", "POST"])
 async def blog_proxy_root(request: Request):
     return await forward_request(BLOG_SERVICE_URL, "/posts", request)
 

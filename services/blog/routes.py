@@ -95,6 +95,7 @@ def create_post(
 
 
 @router.get("/posts", response_model=APIResponse[List[PostResponse]])
+@router.get("/blogs", response_model=APIResponse[List[PostResponse]])
 def list_posts(
     author_id: Optional[int] = Query(None),
     tag: Optional[str] = Query(None),
@@ -125,6 +126,7 @@ def list_posts(
 
 
 @router.get("/posts/{post_id}", response_model=APIResponse[PostResponse])
+@router.get("/blogs/{post_id}", response_model=APIResponse[PostResponse])
 def get_post(post_id: int):
     with get_db() as conn:
         cursor = conn.cursor()

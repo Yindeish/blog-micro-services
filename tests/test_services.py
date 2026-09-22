@@ -28,6 +28,7 @@ blog_db.init_db()
 comment_db.init_db()
 payment_db.init_db()
 
+from unittest.mock import patch, AsyncMock
 from services.user.main import app as user_app
 from services.blog.main import app as blog_app
 from services.comment.main import app as comment_app
@@ -41,9 +42,13 @@ class MicroservicesTestCase(unittest.TestCase):
         cls.blog_client = TestClient(blog_app)
         cls.comment_client = TestClient(comment_app)
         cls.payment_client = TestClient(payment_app)
+        cls.post_patcher = patch("services.comment.routes.verify_post_exists", new_callable=AsyncMock)
+        cls.mock_verify = cls.post_patcher.start()
+        cls.mock_verify.return_value = True
 
     @classmethod
     def tearDownClass(cls):
+        cls.post_patcher.stop()
         shutil.rmtree(test_dir, ignore_errors=True)
 
     def test_01_user_lifecycle(self):
@@ -205,6 +210,24 @@ class MicroservicesTestCase(unittest.TestCase):
         tx_resp = self.payment_client.get("/transactions", headers=reader_headers)
         self.assertEqual(tx_resp.status_code, 200)
         self.assertEqual(len(tx_resp.json()["data"]), 2)  # 1 topup, 1 tip_sent
+
+    def test_05_squad_payment_initiation(self):
+        reader_headers = {"Authorization": f"Bearer {self.bob_token}"}
+        resp = self.payment_client.post(
+            "/initiate-payment",
+            headers=reader_headers,
+            json={
+                "amount": 1000.0,
+                "email": "bob@example.com",
+                "payment_for": "wallet_topup",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data["success"])
+        self.assertIn("checkout_url", data["data"])
+        self.assertTrue(data["data"]["checkout_url"].startswith("http"))
+        self.assertEqual(data["data"]["amount"], 1000.0)
 
 
 if __name__ == "__main__":

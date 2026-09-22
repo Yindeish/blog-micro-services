@@ -18,22 +18,26 @@ The system is designed as a decoupled, resilient microservices blog platform bui
                        │          │          │     │
          ┌─────────────┘          │          │     └─────────────┐
          ▼                        ▼          ▼                   ▼
-┌──────────────────┐    ┌─────────────────┐  ┌─────────────────┐ ┌─────────────────┐
-│   User Service   │    │  Blog Service   │  │ Comment Service │ │ Payment Service │
-│   (Port 8001)    │    │   (Port 8002)   │  │   (Port 8003)   │ │   (Port 8004)   │
-│   data/user.db   │    │   data/blog.db  │  │ data/comment.db │ │ data/payment.db │
-└──────────────────┘    └─────────────────┘  └─────────────────┘ └─────────────────┘
+┌──────────────────┐    ┌─────────────────┐  ┌─────────────────┐ ┌─────────────────────────┐
+│   User Service   │    │  Blog Service   │  │ Comment Service │ │     Payment Service     │
+│   (Port 8001)    │    │   (Port 8002)   │  │   (Port 8003)   │ │       (Port 8004)       │
+│ Supabase: users  │    │ Supabase: posts │  │Supabase:comments│ │ Supabase: wallets/txs   │
+└──────────────────┘    └─────────────────┘  └─────────────────┘ └───────────┬─────────────┘
+                                                                             │
+                                                                             ▼
+                                                                  [ Squad Gateway (GTCO) ]
+                                                                  https://api-d.squadco.com
 ```
 
 ### Microservice Port Map & Responsibilities
 
-| Service | Port | Database | Primary Responsibility |
+| Service | Port | Primary Database | Primary Responsibility |
 | :--- | :--- | :--- | :--- |
 | **API Gateway** | `8000` | N/A | Central routing, unified Swagger docs, aggregated `/health`, token inspection |
-| **User Service** | `8001` | `data/user.db` | User registration, login, PBKDF2 password hashing, JWT creation & verification |
-| **Blog Service** | `8002` | `data/blog.db` | Post CRUD, slug generation, tags, pagination, premium content gating |
-| **Comment Service**| `8003` | `data/comment.db`| Comments & threaded replies on posts, author moderation |
-| **Payment Service**| `8004` | `data/payment.db`| Digital wallet balances, top-ups, author tipping, premium post unlock |
+| **User Service** | `8001` | Supabase `users` | User registration, login, PBKDF2 password hashing, JWT creation & verification |
+| **Blog Service** | `8002` | Supabase `posts` | Post CRUD, slug generation, tags, pagination, premium content gating |
+| **Comment Service**| `8003` | Supabase `comments`| Comments & threaded replies on posts, author moderation |
+| **Payment Service**| `8004` | Supabase `wallets` / `transactions` | Squad checkout initiation, transaction verification, webhooks, tips, post access passes |
 
 ---
 
@@ -153,8 +157,11 @@ docker compose up --build
 - `DELETE /comments/{id}`: Delete comment (Author only)
 
 ### Payment Service (`/api/payments` via Gateway or `:8004` directly)
+- `POST /initiate-payment`: Initiate Squad online payment checkout (`amount`, `email`, `payment_for`, `post_id`) -> returns Squad hosted `checkout_url`
+- `GET /verify/{transaction_ref}`: Verify transaction with Squad and credit wallet / unlock content
+- `POST /webhook`: Webhook endpoint listening for asynchronous Squad payment completion events
 - `GET /wallet`: Get logged-in user's balance
-- `POST /topup`: Top up wallet (`amount`, `payment_method`)
+- `POST /topup`: Direct top up wallet (`amount`, `payment_method`)
 - `POST /tip`: Tip author (`recipient_user_id`, `amount`, `note`)
 - `POST /unlock-post`: Pay to unlock premium post (`post_id`)
 - `GET /access/{post_id}`: Check if logged-in user has access
