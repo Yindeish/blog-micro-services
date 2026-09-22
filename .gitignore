@@ -34,5 +34,5 @@ ENV/
 *.swo
 
 # Environment
-.env
-.env.local
+# .env
+# .env.local
