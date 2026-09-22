@@ -1,0 +1,62 @@
+version: "3.8"
+
+services:
+  gateway:
+    build: .
+    command: python -m uvicorn services.gateway.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      - USER_SERVICE_URL=http://user-service:8001
+      - BLOG_SERVICE_URL=http://blog-service:8002
+      - COMMENT_SERVICE_URL=http://comment-service:8003
+      - PAYMENT_SERVICE_URL=http://payment-service:8004
+      - JWT_SECRET=super-secret-key-change-in-production
+    depends_on:
+      - user-service
+      - blog-service
+      - comment-service
+      - payment-service
+
+  user-service:
+    build: .
+    command: python -m uvicorn services.user.main:app --host 0.0.0.0 --port 8001
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - JWT_SECRET=super-secret-key-change-in-production
+
+  blog-service:
+    build: .
+    command: python -m uvicorn services.blog.main:app --host 0.0.0.0 --port 8002
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - USER_SERVICE_URL=http://user-service:8001
+      - JWT_SECRET=super-secret-key-change-in-production
+
+  comment-service:
+    build: .
+    command: python -m uvicorn services.comment.main:app --host 0.0.0.0 --port 8003
+    ports:
+      - "8003:8003"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - BLOG_SERVICE_URL=http://blog-service:8002
+      - JWT_SECRET=super-secret-key-change-in-production
+
+  payment-service:
+    build: .
+    command: python -m uvicorn services.payment.main:app --host 0.0.0.0 --port 8004
+    ports:
+      - "8004:8004"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - BLOG_SERVICE_URL=http://blog-service:8002
+      - JWT_SECRET=super-secret-key-change-in-production
