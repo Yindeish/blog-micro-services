@@ -14,6 +14,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source code
 COPY . .
 
+# Generate Prisma Client Python bindings
+RUN prisma generate --schema=prisma/schema.prisma
+
 # Expose ports
 EXPOSE 8000 8001 8002 8003 8004
 
